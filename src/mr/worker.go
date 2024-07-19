@@ -36,6 +36,35 @@ func Worker(mapf func(string, string) []KeyValue,
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
 
+	for {
+		task := requestTask()
+		
+		switch task.TaskType {
+		case MapTask:
+			performMap(mapf, task)
+		case ReduceTask:
+			performReduce(reducef, task)
+		case WaitTask:
+			time.Sleep(1 * time.Second)
+			continue
+		case DoneTask:
+			return
+		}
+		
+		reportTaskCompletion(task)
+	}
+
+}
+
+func requestTask() Task {
+	args := GetTaskArgs{}
+	reply := GetTaskReply{}
+	
+	ok := call("Coordinator.GetTask", &args, &reply)
+	if !ok {
+		....... to finish
+	}
+
 }
 
 //

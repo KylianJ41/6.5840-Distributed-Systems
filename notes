@@ -5,3 +5,10 @@ We will run this program locally on our computer, so all files are available to 
 Map phase :
 
 we will start having 1 map task per input file. Reduce task is defined by nReduce (10 per default)
+
+
+TODO:
+
+CHECK FOR ERRORS
+
+File Handling: You might need to add logic for managing intermediate files between map and reduce phases.

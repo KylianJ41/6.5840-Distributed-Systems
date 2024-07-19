@@ -34,7 +34,15 @@ type GetTaskReply struct {
 	NMap int
 }
 
+type TaskCompletionArgs struct {
+	TaskID int
+	TaskType string
+	// else ? workerID ?
+}
 
+type TaskCompletionReply struct {
+	Acknowledged bool
+}
 
 // Add your RPC definitions here.
 

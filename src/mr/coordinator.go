@@ -34,7 +34,8 @@ type Task struct {
 	ID int
 	State TaskState
 	Type string
-	// else ?
+	File string // For Map tasks
+	StartTime time.Time
 }
 
 type Coordinator struct {
@@ -44,6 +45,7 @@ type Coordinator struct {
 	reduceTasks []Task
 	files []string
 	jobPhase string // map or reduce
+	isShutdown bool
 
 	completedMapTasks int
 	completedReduceTasks int
@@ -61,9 +63,36 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	return nil // if we return nil, means there was no error !
 }
 
-//func (c *Coordinator) ReportTaskCompletion(args *TaskCompletionArgs, reply TaskCompletionReply) error
+func (c *Coordinator) markTaskCompleted(taskType string, taskID int) {
+	if taskType == MapTask {
+		if c.mapTasks[taskID].State == InProgress {
+			c.mapTasks[taskID].State = Completed
+			c.completedMapTasks++
+		}
+	} else if taskType == ReduceTask {
+		if c.reduceTasks[taskID].State == InProgress {
+			c.reduceTasks[TaskID].State = Completed
+			c.completedReduceTasks++
+		}
+	}
+}
 
-// func (c *Coordinator) transitionToReducePhase()
+func (c *Coordinator) ReportTaskCompletion(args *TaskCompletionArgs, reply TaskCompletionReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock
+	
+	c.markTaskCompleted(args.TaskType, args.TaskID)
+	
+	if args.TaskType == MapTask && c.completedMapTasks == len(c.mapTasks) {
+		c.transitionToReducePhase()
+	}
+}
+
+func (c *Coordinator) transitionToReducePhase() {
+	c.jobPhase = ReducePhase
+	
+	log.Printf("[coordinator] Transitioning to Reduce phase. %d MapTasks ompleted.\n", len(c.mapTasks))
+}
 
 func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	c.mu.Lock()
@@ -74,6 +103,7 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 		for i, task := range c.mapTasks {
 			if task.State == Idle {
 				c.mapTasks[i].State = InProgress
+				c.mapTasks[i].StartTime = time.Now()
 				reply.TaskType = MapTask
 				reply.TaskID = task.ID
 				reply.FileName = c.files[task.ID]
@@ -91,6 +121,7 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 		for i, task := range c.reduceTasks {
 			if task.State == Idle {
 				c.reduceTasks[i].State = InProgress
+				c.reduceTasks[i].StartTime = time.Now()
 				reply.TaskType = ReduceTask
 				reply.TaskID = task.ID
 				reply.NMap = len(c.MapTasks)
@@ -105,6 +136,39 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	// If we reach here, all tasks are completed
 	reply.TaskType = DoneTask
 	return nil
+}
+
+func (c *Coordinator) checkAndResetTask(Task *Task, now time.Time, timeout time.Duration) {
+	if task.State == InProgress && now.Sub(task.StartTime) > timeout {
+		task.State = Idle
+		task.StartTime = time.Time[} // Reset start time
+	}
+}
+
+func (c *Coordinator) checkTaskTimeouts() {
+	for {
+		time.Sleep(time.Second)
+		c.mu.Lock()
+		if c.isShutdown {
+			c.mu.Unlock()
+			return
+		}
+		
+		now := time.Now()
+		timeout := 10 * time.Second
+		
+		if c.jobPhase == MapPhase {
+			for i := range c.mapTasks {
+				c.checkAndResetTask(&c.mapTasks[i], now, timeout)
+			}
+		} else if c.jobPhase == ReducePhase {
+			for i:= range c.reduceTasks {
+				c.checkAndResetTask(&c.reduceTasks[i], now, timeout)			
+			}	
+		}
+		
+		c.mu.Unlock()
+	}
 }
 
 //
@@ -130,8 +194,11 @@ func (c *Coordinator) server() {
 func (c *Coordinator) Done() bool { // might want to optimize this later	
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	
-	return c.jobPhase == ReducePhase && c.completedReduceTasks == c.nReduce
+	isDone := c.jobPhase == ReducePhase && c.completedReduceTasks == c.nReduce
+	if isDone {
+		c.isShutdown = true
+	}	
+	return isDone
 }
 
 //
@@ -163,7 +230,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	
 	for i:= range c.reduceTasks {
 		c.reduceTasks[i] = Task{
-			ID: len(files) + i,
+			ID: i, //len(files) + i,
 			State: Idle,
 			Type: ReduceTask,
 		}
