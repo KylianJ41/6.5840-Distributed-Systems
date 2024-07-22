@@ -238,7 +238,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	
 	// initialize other necessary state ?
 	
-	// go c.checkTaskTimeouts()
+	go c.checkTaskTimeouts()
 	// start the rpc server
 	c.server()
 	return &c
