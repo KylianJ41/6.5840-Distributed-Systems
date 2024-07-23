@@ -15,17 +15,12 @@ package main
 //   -d directory
 //   -r restart
 
-import "time"
-import "6.5840/diskv"
-import "os"
-import "fmt"
-import "strconv"
-import "runtime"
-
+/*
 func usage() {
 	fmt.Printf("Usage: diskvd -g gid -m master... -s server... -i my-index -d dir\n")
 	os.Exit(1)
 }
+
 
 func main() {
 	var gid int64 = -1     // my replica group ID
@@ -72,3 +67,4 @@ func main() {
 	mep, _ := os.FindProcess(os.Getpid())
 	mep.Kill()
 }
+*/

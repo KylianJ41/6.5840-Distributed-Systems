@@ -11,11 +11,7 @@ package main
 // on Athena, use /tmp/myname-a and /tmp/myname-b
 // instead of a and b.
 
-import "time"
-import "6.5840/lockservice"
-import "os"
-import "fmt"
-
+/*
 func main() {
 	if len(os.Args) == 4 && os.Args[1] == "-p" {
 		lockservice.StartServer(os.Args[2], os.Args[3], true)
@@ -29,3 +25,4 @@ func main() {
 		time.Sleep(100 * time.Second)
 	}
 }
+*/

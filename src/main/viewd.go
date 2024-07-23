@@ -4,11 +4,7 @@ package main
 // see directions in pbc.go
 //
 
-import "time"
-import "6.5840/viewservice"
-import "os"
-import "fmt"
-
+/*
 func main() {
 	if len(os.Args) != 2 {
 		fmt.Printf("Usage: viewd port\n")
@@ -21,3 +17,4 @@ func main() {
 		time.Sleep(100 * time.Second)
 	}
 }
+*/
