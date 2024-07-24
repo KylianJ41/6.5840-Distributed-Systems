@@ -61,10 +61,36 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 				return nil
 			}
 		}
+		reply.TaskType = WaitTask
+		return nil
 	}
 
-	// If we get here, there are no idle tasks
-	reply.TaskType = "wait"
+	if c.jobPhase == ReducePhase {
+		for i, task := range c.reduceTasks {
+			if task.State == Idle {
+				c.reduceTasks[i].State = InProgress
+				reply.TaskType = ReduceTask
+				reply.TaskID = i
+				reply.NMap = len(c.mapTasks)
+				return nil
+			}
+		}
+	}
+
+	// Check if all tasks are completed
+	allCompleted := true
+	for _, task := range c.reduceTasks {
+		if task.State != Completed {
+			allCompleted = false
+			break
+		}
+	}
+
+	if allCompleted {
+		reply.TaskType = DoneTask
+	} else {
+		reply.TaskType = WaitTask
+	}
 	return nil
 }
 
@@ -105,10 +131,11 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
-		files:    files,
-		nReduce:  nReduce,
-		jobPhase: MapPhase,
-		mapTasks: make([]Task, len(files)),
+		files:       files,
+		nReduce:     nReduce,
+		jobPhase:    MapPhase,
+		mapTasks:    make([]Task, len(files)),
+		reduceTasks: make([]Task, nReduce),
 	}
 
 	for i, file := range files {
@@ -134,3 +161,13 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 //////////////////////////////////////////////////////////
 // Functions that are used for testing purpose only
+
+func (c *Coordinator) CompleteAllMapTasks() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for i := range c.mapTasks {
+		c.mapTasks[i].State = Completed
+	}
+	c.jobPhase = ReducePhase
+}
