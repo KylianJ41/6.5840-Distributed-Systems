@@ -7,6 +7,7 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
 
 type TaskState int
@@ -25,24 +26,30 @@ const (
 )
 
 const (
-	MapPhase    = "map"
-	ReducePhase = "phase"
+	MapPhase       = "map"
+	ReducePhase    = "reduce"
+	CompletedPhase = "completed"
 )
 
+const TaskTimeout = 10 * time.Second
+
 type Task struct {
-	ID    int
-	State TaskState
-	Type  string
-	File  string // for map tasks
+	ID        int
+	State     TaskState
+	Type      string
+	File      string // for map tasks
+	StartTime time.Time
 }
 
 type Coordinator struct {
-	mu          sync.Mutex
-	mapTasks    []Task
-	reduceTasks []Task
-	files       []string
-	nReduce     int
-	jobPhase    string
+	mu                   sync.Mutex
+	mapTasks             []Task
+	reduceTasks          []Task
+	files                []string
+	nReduce              int
+	jobPhase             string
+	completedMapTasks    int
+	completedReduceTasks int
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -50,48 +57,135 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.jobPhase == MapPhase {
-		for i := range c.mapTasks {
-			if c.mapTasks[i].State == Idle {
-				c.mapTasks[i].State = InProgress
-				reply.TaskType = c.mapTasks[i].Type
-				reply.TaskID = c.mapTasks[i].ID
-				reply.FileName = c.mapTasks[i].File
-				reply.NReduce = c.nReduce
-				return nil
-			}
-		}
-		reply.TaskType = WaitTask
-		return nil
-	}
+	c.checkTimeouts() // Check for timed-out tasks before assigning new ones
 
-	if c.jobPhase == ReducePhase {
-		for i, task := range c.reduceTasks {
-			if task.State == Idle {
-				c.reduceTasks[i].State = InProgress
-				reply.TaskType = ReduceTask
-				reply.TaskID = i
-				reply.NMap = len(c.mapTasks)
-				return nil
-			}
+	switch c.jobPhase {
+	case MapPhase:
+		err := c.getMapTask(reply)
+		if reply.TaskType != WaitTask {
+			log.Printf("Assigned map task %d for file %s\n", reply.TaskID, reply.FileName)
+		}
+		return err
+	case ReducePhase:
+		err := c.getReduceTask(reply)
+		if reply.TaskType != WaitTask {
+			log.Printf("Assigned reduce task %d\n", reply.TaskID)
+		}
+		return err
+	default:
+		return c.getFinalTaskState(reply)
+	}
+}
+
+func (c *Coordinator) getMapTask(reply *GetTaskReply) error {
+	for i := range c.mapTasks {
+		if c.mapTasks[i].State == Idle {
+			c.mapTasks[i].State = InProgress
+			c.mapTasks[i].StartTime = time.Now()
+			reply.TaskType = c.mapTasks[i].Type
+			reply.TaskID = c.mapTasks[i].ID
+			reply.FileName = c.mapTasks[i].File
+			reply.NReduce = c.nReduce
+			return nil
 		}
 	}
+	reply.TaskType = WaitTask
+	return nil
+}
 
-	// Check if all tasks are completed
-	allCompleted := true
+func (c *Coordinator) getReduceTask(reply *GetTaskReply) error {
+	for i := range c.reduceTasks {
+		if c.reduceTasks[i].State == Idle {
+			c.reduceTasks[i].State = InProgress
+			c.reduceTasks[i].StartTime = time.Now()
+			reply.TaskType = ReduceTask
+			reply.TaskID = i
+			reply.NMap = len(c.mapTasks)
+			return nil
+		}
+	}
+	return c.getFinalTaskState(reply)
+}
+
+func (c *Coordinator) areAllTasksCompleted() bool {
 	for _, task := range c.reduceTasks {
 		if task.State != Completed {
-			allCompleted = false
-			break
+			return false
 		}
 	}
+	return true
+}
 
-	if allCompleted {
+func (c *Coordinator) getFinalTaskState(reply *GetTaskReply) error {
+	if c.areAllTasksCompleted() {
 		reply.TaskType = DoneTask
 	} else {
 		reply.TaskType = WaitTask
 	}
 	return nil
+}
+
+func (c *Coordinator) checkTimeouts() {
+	now := time.Now()
+	if c.jobPhase == MapPhase {
+		for i := range c.mapTasks {
+			if c.mapTasks[i].State == InProgress && now.Sub(c.mapTasks[i].StartTime) > TaskTimeout {
+				c.mapTasks[i].State = Idle
+				c.mapTasks[i].StartTime = time.Time{}
+				log.Printf("Map task %d timed out and reset to Idle\n", i)
+			}
+		}
+	} else if c.jobPhase == ReducePhase {
+		for i := range c.reduceTasks {
+			if c.reduceTasks[i].State == InProgress && now.Sub(c.reduceTasks[i].StartTime) > TaskTimeout {
+				c.reduceTasks[i].State = Idle
+				c.reduceTasks[i].StartTime = time.Time{}
+				log.Printf("Reduce task %d timed out and reset to Idle\n", i)
+			}
+		}
+	}
+}
+
+func (c *Coordinator) MarkTaskCompleted(args *TaskCompletionArgs, reply *TaskCompletionReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	switch args.TaskType {
+	case MapTask:
+		if args.TaskID < len(c.mapTasks) && c.mapTasks[args.TaskID].State == InProgress {
+			c.mapTasks[args.TaskID].State = Completed
+			c.completedMapTasks++
+			log.Printf("Map task %d completed. Total completed: %d/%d\n",
+				args.TaskID, c.completedMapTasks, len(c.mapTasks))
+			c.checkMapPhaseCompletion()
+			reply.Acknowledged = true
+		}
+	case ReduceTask:
+		if args.TaskID < len(c.reduceTasks) && c.reduceTasks[args.TaskID].State == InProgress {
+			c.reduceTasks[args.TaskID].State = Completed
+			c.completedReduceTasks++
+			log.Printf("Reduce task %d completed. Total completed: %d/%d\n",
+				args.TaskID, c.completedReduceTasks, len(c.reduceTasks))
+			c.checkReducePhaseCompletion()
+			reply.Acknowledged = true
+		}
+	}
+
+	return nil
+}
+
+func (c *Coordinator) checkMapPhaseCompletion() {
+	if c.completedMapTasks == len(c.mapTasks) {
+		c.jobPhase = ReducePhase
+		log.Println("All map tasks completed. Transitioning to Reduce phase.")
+	}
+}
+
+func (c *Coordinator) checkReducePhaseCompletion() {
+	if c.completedReduceTasks == len(c.reduceTasks) {
+		c.jobPhase = CompletedPhase
+		log.Println("All reduce tasks completed. Job finished.")
+	}
 }
 
 // an example RPC handler.
@@ -119,23 +213,24 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := false
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	// Your code here.
-
-	return ret
+	return c.jobPhase == CompletedPhase
 }
 
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
-func MakeCoordinator(files []string, nReduce int) *Coordinator {
+func MakeCoordinator(files []string, nReduce int, startServer bool) *Coordinator {
 	c := Coordinator{
-		files:       files,
-		nReduce:     nReduce,
-		jobPhase:    MapPhase,
-		mapTasks:    make([]Task, len(files)),
-		reduceTasks: make([]Task, nReduce),
+		files:                files,
+		nReduce:              nReduce,
+		jobPhase:             MapPhase,
+		mapTasks:             make([]Task, len(files)),
+		reduceTasks:          make([]Task, nReduce),
+		completedMapTasks:    0,
+		completedReduceTasks: 0,
 	}
 
 	for i, file := range files {
@@ -155,19 +250,11 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		}
 	}
 
-	c.server()
-	return &c
-}
+	log.Printf("Coordinator created with %d map tasks and %d reduce tasks\n", len(files), nReduce)
 
-//////////////////////////////////////////////////////////
-// Functions that are used for testing purpose only
-
-func (c *Coordinator) CompleteAllMapTasks() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	for i := range c.mapTasks {
-		c.mapTasks[i].State = Completed
+	if startServer { // to avoid starting the server in unit tests
+		c.server()
+		log.Println("Coordinator server started")
 	}
-	c.jobPhase = ReducePhase
+	return &c
 }
