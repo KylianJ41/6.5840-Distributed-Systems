@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/rpc"
@@ -95,65 +96,27 @@ func performMap(mapf func(string, string) []KeyValue, task GetTaskReply) error {
 }
 
 func performReduce(reducef func(string, []string) string, task GetTaskReply) error {
-	intermediate := []KeyValue{}
-	for i := 0; i < task.NMap; i++ {
-		filename := fmt.Sprintf("mr-%d-%d", i, task.TaskID)
-		file, err := os.Open(filename)
-		if err != nil {
-			return fmt.Errorf("cannot open %v", filename)
-		}
-		dec := json.NewDecoder(file)
-		for {
-			var kv KeyValue
-			if err := dec.Decode(&kv); err != nil {
-				break
-			}
-			intermediate = append(intermediate, kv)
-		}
-		file.Close()
+	intermediate, err := readIntermediateFiles(task)
+	if err != nil {
+		return fmt.Errorf("error reading intermediate files: %v", err)
 	}
 
 	sort.Sort(ByKey(intermediate))
 
-	oname := fmt.Sprintf("mr-out-%d", task.TaskID)
-	tempFile, err := ioutil.TempFile("", fmt.Sprintf("mr-tmp-reduce-%d-*", task.TaskID))
+	tempFile, tempFilename, err := createTempFile(task.TaskID)
 	if err != nil {
 		return fmt.Errorf("cannot create temp file: %v", err)
 	}
-	tempFilename := tempFile.Name()
+	defer cleanupTempFile(tempFile, &tempFilename)
 
-	defer tempFile.Close()
-	defer os.Remove(tempFilename)
-
-	i := 0
-	for i < len(intermediate) {
-		j := i + 1
-		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
-			j++
-		}
-		values := []string{}
-		for k := i; k < j; k++ {
-			values = append(values, intermediate[k].Value)
-		}
-		output := reducef(intermediate[i].Key, values)
-
-		fmt.Fprintf(tempFile, "%v %v\n", intermediate[i].Key, output)
-
-		i = j
+	err = writeReduceOutput(tempFile, intermediate, reducef)
+	if err != nil {
+		return fmt.Errorf("error writing reduce output: %v", err)
 	}
 
-	// Close the file before renaming
-	if err := tempFile.Close(); err != nil {
-		return fmt.Errorf("error closing temp file: %v", err)
+	if err := finalizeOutput(tempFile, tempFilename, task.TaskID); err != nil {
+		return fmt.Errorf("error finalizing output: %v", err)
 	}
-
-	// Atomically rename the temp file to the final output file
-	if err := os.Rename(tempFilename, oname); err != nil {
-		return fmt.Errorf("cannot rename temp file: %v", err)
-	}
-
-	// If we've successfully renamed, prevent the deferred removal
-	tempFilename = ""
 
 	return nil
 }
@@ -212,6 +175,89 @@ func writeIntermediateFiles(mapTaskID, nReduce int, kva []KeyValue) error {
 			return fmt.Errorf("cannot rename %s to %s: %v", tmpFile.Name(), finalName, err)
 		}
 		//tmpFiles[i] = nil // Prevent removal in cleanup function
+	}
+
+	return nil
+}
+
+func readIntermediateFiles(task GetTaskReply) ([]KeyValue, error) {
+	var intermediate []KeyValue
+	for i := 0; i < task.NMap; i++ {
+		filename := fmt.Sprintf("mr-%d-%d", i, task.TaskID)
+		kvs, err := readKeyValuesFromFile(filename)
+		if err != nil {
+			return nil, fmt.Errorf("error reding from %s: %v", filename, err)
+		}
+		intermediate = append(intermediate, kvs...)
+	}
+	return intermediate, nil
+}
+
+func readKeyValuesFromFile(filename string) ([]KeyValue, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var kvs []KeyValue
+	dec := json.NewDecoder(file)
+	for {
+		var kv KeyValue
+		if err := dec.Decode(&kv); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+		kvs = append(kvs, kv)
+	}
+	return kvs, nil
+}
+
+func createTempFile(taskID int) (*os.File, string, error) {
+	tempFile, err := ioutil.TempFile("", fmt.Sprintf("mr-tem-reduce-%d-*", taskID))
+	if err != nil {
+		return nil, "", err
+	}
+	return tempFile, tempFile.Name(), nil
+}
+
+func cleanupTempFile(file *os.File, filename *string) {
+	file.Close()
+	if *filename != "" {
+		os.Remove(*filename)
+	}
+}
+
+func writeReduceOutput(file *os.File, intermediate []KeyValue, reducef func(string, []string) string) error {
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := make([]string, j-i)
+		for k := i; k < j; k++ {
+			values[k-i] = intermediate[k].Value
+		}
+		output := reducef(intermediate[i].Key, values)
+		if _, err := fmt.Fprintf(file, "%v %v\n", intermediate[i].Key, output); err != nil {
+			return err
+		}
+		i = j
+	}
+	return nil
+}
+
+func finalizeOutput(tempFile *os.File, tempFilename string, taskID int) error {
+	if err := tempFile.Close(); err != nil {
+		return fmt.Errorf("error closing temp file: %v", err)
+	}
+
+	oname := fmt.Sprintf("mr-out-%d", taskID)
+	if err := os.Rename(tempFilename, oname); err != nil {
+		return fmt.Errorf("cannot rename temp file: %v", err)
 	}
 
 	return nil
