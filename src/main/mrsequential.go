@@ -16,7 +16,7 @@ func (a ByKey) Len() int           { return len(a) }
 func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
-/*
+
 func main() {
 	if len(os.Args) < 3 {
 		fmt.Fprintf(os.Stderr, "Usage: mrsequential xxx.so inputfiles...\n")
@@ -101,4 +101,4 @@ func loadPlugin(filename string) (func(string, string) []mr.KeyValue, func(strin
 
 	return mapf, reducef
 }
-*/
+
