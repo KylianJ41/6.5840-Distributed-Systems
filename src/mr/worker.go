@@ -10,6 +10,7 @@ import (
 	"net/rpc"
 	"os"
 	"sort"
+	"time"
 )
 
 // Map functions return a slice of KeyValue.
@@ -51,16 +52,26 @@ func Worker(mapf func(string, string) []KeyValue,
 
 		switch task.TaskType {
 		case MapTask:
-			//performMap(mapf, task)
+			err := performMap(mapf, task)
+			if err != nil {
+				log.Fatalf("Error performing map task: %v", err)
+			}
+			reportTaskCompletion(task)
 		case ReduceTask:
-			// TODO
+			err := performReduce(reducef, task)
+			if err != nil {
+				log.Fatalf("Error performing reduce task: %v", err)
+			}
+			reportTaskCompletion(task)
+			cleanupIntermediateFiles(task.NMap, task.TaskID)
 		case WaitTask:
-			log.Println("No task available. Waiting...")
-			// TODO
+			//log.Println("No task available. Waiting...")
+			time.Sleep(1 * time.Second)
 		case DoneTask:
-			log.Println("All tasks completed. Worker exciting.")
+			//log.Println("All tasks completed. Worker exciting.")
 			return
 		}
+
 	}
 }
 
@@ -72,6 +83,20 @@ func requestTask() GetTaskReply {
 		log.Fatalf("Failed to get task from coordinator")
 	}
 	return reply
+}
+
+func reportTaskCompletion(task GetTaskReply) {
+	args := TaskCompletionArgs{
+		TaskID:   task.TaskID,
+		TaskType: task.TaskType,
+	}
+	reply := TaskCompletionReply{}
+
+	//ok := rpcCall("Coordinator.ReportTaskCompletion", &args, &reply)
+	ok := rpcCall("Coordinator.MarkTaskCompleted", &args, &reply)
+	if !ok {
+		log.Fatalf("Failed to report task completion to coordinator")
+	}
 }
 
 func performMap(mapf func(string, string) []KeyValue, task GetTaskReply) error {
@@ -174,7 +199,6 @@ func writeIntermediateFiles(mapTaskID, nReduce int, kva []KeyValue) error {
 			cleanup()
 			return fmt.Errorf("cannot rename %s to %s: %v", tmpFile.Name(), finalName, err)
 		}
-		//tmpFiles[i] = nil // Prevent removal in cleanup function
 	}
 
 	return nil
@@ -186,6 +210,10 @@ func readIntermediateFiles(task GetTaskReply) ([]KeyValue, error) {
 		filename := fmt.Sprintf("mr-%d-%d", i, task.TaskID)
 		kvs, err := readKeyValuesFromFile(filename)
 		if err != nil {
+			if os.IsNotExist(err) {
+				// Skip files that don't exist
+				continue
+			}
 			return nil, fmt.Errorf("error reding from %s: %v", filename, err)
 		}
 		intermediate = append(intermediate, kvs...)
@@ -227,6 +255,16 @@ func cleanupTempFile(file *os.File, filename *string) {
 	file.Close()
 	if *filename != "" {
 		os.Remove(*filename)
+	}
+}
+
+func cleanupIntermediateFiles(mapTasks int, reduceTaskID int) {
+	for i := 0; i < mapTasks; i++ {
+		filename := fmt.Sprintf("mr-%d-%d", i, reduceTaskID)
+		err := os.Remove(filename)
+		if err != nil && !os.IsNotExist(err) {
+			log.Printf("Error removing intermediate file %s: %v", filename, err)
+		}
 	}
 }
 

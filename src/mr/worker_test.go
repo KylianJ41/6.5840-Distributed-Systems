@@ -7,12 +7,14 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 )
 
 type MockCoordinator struct {
-	taskGiven bool
-	taskType  string
+	taskGiven   bool
+	taskType    string
+	completions []TaskCompletionArgs
 }
 
 func (m *MockCoordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
@@ -20,6 +22,12 @@ func (m *MockCoordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error 
 	reply.TaskType = m.taskType
 	reply.TaskID = 1
 	reply.FileName = "testdata/testfile.txt"
+	return nil
+}
+
+func (m *MockCoordinator) MarkTaskCompleted(args *TaskCompletionArgs, reply *TaskCompletionReply) error {
+	m.completions = append(m.completions, *args)
+	reply.Acknowledged = true
 	return nil
 }
 
@@ -88,6 +96,16 @@ func TestWriteIntermediateFiles(t *testing.T) {
 			kvs = append(kvs, kv)
 		}
 
+		// compare the content of the file with the original kva
+		for _, kv := range kva {
+			for _, kv2 := range kvs {
+				if kv.Key != kv2.Key && kv.Value != kv2.Value {
+					t.Fatalf("Expected KeyValue %v, got %v", kv, kv2)
+				}
+			}
+
+		}
+
 		// Check if the KeyValues in this file all hash to this reduce task
 		for _, kv := range kvs {
 			if ihash(kv.Key)%nReduce != i {
@@ -139,7 +157,7 @@ func TestPerformMap(t *testing.T) {
 		t.Fatalf("performMap failed: %v", err)
 	}
 
-	// Chack if intermediate files were created
+	// Check if intermediate files were created
 	for i := 0; i < task.NReduce; i++ {
 		filename := fmt.Sprintf("mr-%d-%d", task.TaskID, i)
 		if _, err := os.Stat(filename); os.IsNotExist(err) {
@@ -221,4 +239,89 @@ func TestPerformReduce(t *testing.T) {
 	if string(content) != expectedOutput {
 		t.Errorf("Output content mismatch. Expected:\n%s\nGot:\n%s", expectedOutput, string(content))
 	}
+}
+
+func TestWorkerLoop(t *testing.T) {
+	content := []byte("Hello World\nThis is a test\nMapReduce is cool")
+	tmpfile, err := ioutil.TempFile("", "testfile-*.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpfile.Name()) // clean up
+
+	if _, err := tmpfile.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := tmpfile.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	taskSequence := []string{WaitTask, MapTask, WaitTask, ReduceTask, WaitTask, DoneTask}
+	taskIndex := 0
+	mockCoord := &MockCoordinator{}
+	nReduce := 3
+	nMap := 1 // We only have one map task in this test
+
+	originalRPCCall := rpcCall
+	rpcCall = func(rpcname string, args interface{}, reply interface{}) bool {
+		switch rpcname {
+		case "Coordinator.GetTask":
+			reply.(*GetTaskReply).TaskType = taskSequence[taskIndex]
+			reply.(*GetTaskReply).TaskID = taskIndex + 1
+			reply.(*GetTaskReply).FileName = tmpfile.Name()
+			reply.(*GetTaskReply).NReduce = nReduce
+			reply.(*GetTaskReply).NMap = nMap
+			taskIndex++
+		case "Coordinator.MarkTaskCompleted":
+			mockCoord.MarkTaskCompleted(args.(*TaskCompletionArgs), reply.(*TaskCompletionReply))
+		}
+		return true
+	}
+	defer func() { rpcCall = originalRPCCall }()
+
+	done := make(chan bool)
+	go func() {
+		Worker(mockMapFunc, mockReduceFunc)
+		done <- true
+	}()
+
+	select {
+	case <-done:
+		// Worker finished successfully
+	case <-time.After(10 * time.Second):
+		t.Fatal("Worker did not finish in time")
+	}
+
+	expectedCompletions := 2
+	if len(mockCoord.completions) != expectedCompletions {
+		t.Errorf("Expected %d completions, got %d", expectedCompletions, len(mockCoord.completions))
+	}
+
+	expectedOrder := []string{MapTask, ReduceTask}
+	for i, completion := range mockCoord.completions {
+		if completion.TaskType != expectedOrder[i] {
+			t.Errorf("Expected completion type %s, got %s", expectedOrder[i], completion.TaskType)
+		}
+	}
+
+	// Verify that the correct number of tasks were processed
+	if taskIndex != len(taskSequence) {
+		t.Errorf("Expected %d tasks to be processed, but %d were processed", len(taskSequence), taskIndex)
+	}
+
+	// Check for intermediate files created by the Map task
+	for i := 0; i < nReduce; i++ {
+		filename := fmt.Sprintf("mr-%d-%d", 2, i)
+		if _, err := os.Stat(filename); os.IsNotExist(err) {
+			t.Errorf("Expected intermediate file %s was not created", filename)
+		}
+		defer os.Remove(filename)
+	}
+
+	// Check for the output file created by the Reduce task
+	outFile := fmt.Sprintf("mr-out-%d", 4) // Reduce task ID is 4
+	if _, err := os.Stat(outFile); os.IsNotExist(err) {
+		t.Errorf("Expected output file %s was not created", outFile)
+	}
+	defer os.Remove(outFile)
 }
