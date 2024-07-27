@@ -65,10 +65,10 @@ func Worker(mapf func(string, string) []KeyValue,
 			reportTaskCompletion(task)
 			cleanupIntermediateFiles(task.NMap, task.TaskID)
 		case WaitTask:
-			//log.Println("No task available. Waiting...")
+			log.Println("No task available. Waiting...")
 			time.Sleep(1 * time.Second)
 		case DoneTask:
-			//log.Println("All tasks completed. Worker exciting.")
+			log.Println("All tasks completed. Worker exciting.")
 			return
 		}
 
@@ -92,7 +92,6 @@ func reportTaskCompletion(task GetTaskReply) {
 	}
 	reply := TaskCompletionReply{}
 
-	//ok := rpcCall("Coordinator.ReportTaskCompletion", &args, &reply)
 	ok := rpcCall("Coordinator.MarkTaskCompleted", &args, &reply)
 	if !ok {
 		log.Fatalf("Failed to report task completion to coordinator")

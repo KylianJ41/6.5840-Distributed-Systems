@@ -6,7 +6,16 @@ package main
 // go run mrsequential.go wc.so pg*.txt
 //
 
-import "6.5840/mr"
+import (
+	"fmt"
+	"io/ioutil"
+	"log"
+	"os"
+	"plugin"
+	"sort"
+
+	"6.5840/mr"
+)
 
 // for sorting by key.
 type ByKey []mr.KeyValue
@@ -15,7 +24,6 @@ type ByKey []mr.KeyValue
 func (a ByKey) Len() int           { return len(a) }
 func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
-
 
 func main() {
 	if len(os.Args) < 3 {
@@ -101,4 +109,3 @@ func loadPlugin(filename string) (func(string, string) []mr.KeyValue, func(strin
 
 	return mapf, reducef
 }
-
