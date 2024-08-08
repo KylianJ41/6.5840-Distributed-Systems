@@ -1,19 +1,22 @@
 package kvsrv
 
-import "6.5840/labrpc"
-import "testing"
-import "os"
+import (
+	"os"
+	"testing"
 
-//import "log"
-import crand "crypto/rand"
-import "math/big"
-import "math/rand"
-import "encoding/base64"
-import "sync"
-import "runtime"
-import "fmt"
-import "time"
-import "sync/atomic"
+	"6.5840/labrpc"
+
+	//import "log"
+	crand "crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"math/big"
+	"math/rand"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"time"
+)
 
 const SERVERID = 0
 
@@ -105,7 +108,9 @@ func (cfg *config) ConnectClient(ck *Clerk) {
 func (cfg *config) StartServer() {
 	cfg.kvserver = StartKVServer()
 
+	fmt.Println("Debug: Starting server")
 	kvsvc := labrpc.MakeService(cfg.kvserver)
+
 	srv := labrpc.MakeServer()
 	srv.AddService(kvsvc)
 	cfg.net.AddServer(0, srv)
