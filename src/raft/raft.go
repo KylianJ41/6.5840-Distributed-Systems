@@ -72,8 +72,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term          int
+	Success       bool
+	ConflictIndex int
+	ConflictTerm  int
 }
 
 // A Go object implementing a single Raft peer.
@@ -102,9 +104,10 @@ type Raft struct {
 	matchIndex []int //for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
 
 	// Aditional state for leader election
-	state ServerState
-
+	state         ServerState
 	lastHeartbeat time.Time
+
+	applyCh chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -237,20 +240,38 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if args.PrevLogIndex > len(rf.log)-1 {
 		reply.Term = rf.currentTerm
+		reply.ConflictIndex = len(rf.log)
+		reply.ConflictTerm = -1
 		return
 	}
 
 	if args.PrevLogIndex >= 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Term = rf.currentTerm
+		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+		for i := args.PrevLogIndex; i > 0; i-- {
+			if rf.log[i-1].Term != reply.ConflictTerm {
+				reply.ConflictIndex = i
+				break
+			}
+		}
 		return
 	}
 
-	rf.log = rf.log[:args.PrevLogIndex+1]
-	rf.log = append(rf.log, args.Entries...)
-	rf.persist()
+	for i, entry := range args.Entries {
+		index := args.PrevLogIndex + 1 + i
+		if index < len(rf.log) {
+			if rf.log[index].Term != entry.Term {
+				rf.log = rf.log[:index]
+				rf.log = append(rf.log, entry)
+			}
+		} else {
+			rf.log = append(rf.log, entry)
+		}
+	}
 
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+		go rf.applyCommited()
 	}
 
 	reply.Success = true
@@ -261,6 +282,21 @@ func min(a, b int) int {
 		return a
 	} else {
 		return b
+	}
+}
+
+func (rf *Raft) applyCommited() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+		msg := ApplyMsg{
+			CommandValid: true,
+			Command:      rf.log[i].Command,
+			CommandIndex: i,
+		}
+		rf.applyCh <- msg
+		rf.lastApplied = i
 	}
 }
 
@@ -279,35 +315,87 @@ func (rf *Raft) sendHeartbeats() {
 
 		for i := range rf.peers {
 			if i != rf.me {
-				go func(peer int) {
-					rf.mu.Lock()
-					args := &AppendEntriesArgs{
-						Term:         rf.currentTerm,
-						LeaderId:     rf.me,
-						PrevLogIndex: rf.nextIndex[peer] - 1,
-						PrevLogTerm:  rf.log[rf.nextIndex[peer]-1].Term,
-						Entries:      []LogEntry{},
-						LeaderCommit: rf.commitIndex,
-					}
-					rf.mu.Unlock()
-
-					reply := &AppendEntriesReply{}
-					if rf.sendAppendEntries(peer, args, reply) {
-						rf.mu.Lock()
-						defer rf.mu.Unlock()
-						if reply.Term > rf.currentTerm {
-							rf.currentTerm = reply.Term
-							rf.state = Follower
-							rf.votedFor = -1
-							rf.persist()
-						}
-					}
-				}(i)
+				go rf.sendAppendEntriesToPeer(i)
 			}
 		}
 		rf.mu.Unlock()
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+func (rf *Raft) sendAppendEntriesToPeer(peer int) {
+	rf.mu.Lock()
+	prevLogIndex := rf.nextIndex[peer] - 1
+	prevLogTerm := rf.log[prevLogIndex].Term
+	entries := rf.log[rf.nextIndex[peer]:]
+	args := &AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: prevLogIndex,
+		PrevLogTerm:  prevLogTerm,
+		Entries:      entries,
+		LeaderCommit: rf.commitIndex,
+	}
+	rf.mu.Unlock()
+
+	reply := &AppendEntriesReply{}
+	if rf.sendAppendEntries(peer, args, reply) {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+
+		if reply.Term > rf.currentTerm {
+			rf.currentTerm = reply.Term
+			rf.state = Follower
+			rf.votedFor = -1
+			return
+		}
+
+		if reply.Success {
+			rf.nextIndex[peer] = prevLogIndex + len(entries) + 1
+			rf.matchIndex[peer] = rf.nextIndex[peer] - 1
+			rf.updateCommitIndex()
+		} else {
+			if reply.ConflictTerm != -1 {
+				lastIndex := rf.findLastIndexOfTerm(reply.ConflictTerm)
+				if lastIndex != -1 {
+					rf.nextIndex[peer] = lastIndex
+				} else {
+					rf.nextIndex[peer] = reply.ConflictIndex
+				}
+			} else {
+				rf.nextIndex[peer] = reply.ConflictIndex
+			}
+		}
+	}
+}
+
+func (rf *Raft) updateCommitIndex() {
+	for i := rf.commitIndex + 1; i < len(rf.log); i++ {
+		if rf.log[i].Term == rf.currentTerm {
+			count := 1
+			for j := range rf.peers {
+				if j != rf.me && rf.matchIndex[j] >= i {
+					count++
+				}
+			}
+			if count > len(rf.peers)/2 {
+				rf.commitIndex = i
+				go rf.applyCommited()
+			}
+		}
+	}
+}
+
+func (rf *Raft) findLastIndexOfTerm(term int) int {
+	for i := len(rf.log) - 1; i >= 0; i-- {
+		if rf.log[i].Term == term {
+			return i
+		}
+		if rf.log[i].Term < term {
+			break
+		}
+	}
+	return -1
 }
 
 func (rf *Raft) startElection() {
@@ -498,6 +586,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make([]int, len(peers))
 	rf.state = Follower
 	rf.lastHeartbeat = time.Now()
+	rf.applyCh = applyCh
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
