@@ -19,12 +19,14 @@ package raft
 
 import (
 	//	"bytes"
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -135,6 +137,14 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -155,6 +165,21 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil {
+		// ERROR
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -263,9 +288,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			if rf.log[index].Term != entry.Term {
 				rf.log = rf.log[:index]
 				rf.log = append(rf.log, entry)
+				rf.persist()
 			}
 		} else {
 			rf.log = append(rf.log, entry)
+			rf.persist()
 		}
 	}
 
@@ -306,7 +333,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 }
 
 func (rf *Raft) sendHeartbeats() {
-	for rf.killed() == false {
+	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.state != Leader {
 			rf.mu.Unlock()
@@ -355,22 +382,14 @@ func (rf *Raft) sendAppendEntriesToPeer(peer int) {
 			rf.matchIndex[peer] = rf.nextIndex[peer] - 1
 			rf.updateCommitIndex()
 		} else {
-			if reply.ConflictTerm != -1 {
-				lastIndex := rf.findLastIndexOfTerm(reply.ConflictTerm)
-				if lastIndex != -1 {
-					rf.nextIndex[peer] = lastIndex
-				} else {
-					rf.nextIndex[peer] = reply.ConflictIndex
-				}
-			} else {
-				rf.nextIndex[peer] = reply.ConflictIndex
-			}
+			rf.nextIndex[peer] = reply.ConflictIndex
 		}
 	}
 }
 
 func (rf *Raft) updateCommitIndex() {
 	for i := rf.commitIndex + 1; i < len(rf.log); i++ {
+		// leader can only commit log entries from the current term
 		if rf.log[i].Term == rf.currentTerm {
 			count := 1
 			for j := range rf.peers {
@@ -384,18 +403,6 @@ func (rf *Raft) updateCommitIndex() {
 			}
 		}
 	}
-}
-
-func (rf *Raft) findLastIndexOfTerm(term int) int {
-	for i := len(rf.log) - 1; i >= 0; i-- {
-		if rf.log[i].Term == term {
-			return i
-		}
-		if rf.log[i].Term < term {
-			break
-		}
-	}
-	return -1
 }
 
 func (rf *Raft) startElection() {
@@ -523,6 +530,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := len(rf.log)
 	term := rf.currentTerm
 	rf.log = append(rf.log, LogEntry{term, command})
+	rf.persist()
 
 	return index, term, true
 }
@@ -547,7 +555,7 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
+	for !rf.killed() {
 		// Randomize the election timeout between 300 and 600 ms
 		electionTimeout := time.Duration(300+rand.Intn(300)) * time.Millisecond
 		time.Sleep(electionTimeout)
